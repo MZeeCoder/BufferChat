@@ -29,12 +29,16 @@ export default function MessageScreen() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ message: currentInput }),
             });
-
             const data = await res.json();
-            console.log('the Response:', data.text);
+            console.log('the Response:', data);
             // 3. Add AI response to UI
-            if (data.text) {
-                setMessages((prev) => [...prev, { text: data.text, isAgent: true }]);
+            if (data) {
+                // Extract the string value from the object. 
+                // If your API sends { data: "..." }, use responseObj.data
+                // If your API sends { message: "..." }, use responseObj.message
+
+                const textString = data.data; // <-- Adjust this key if needed
+                setMessages((prev) => [...prev, { text: textString, isAgent: true }]);
             }
         } catch (error) {
             console.error('Error:', error);

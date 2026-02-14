@@ -26,35 +26,58 @@ export async function POST(req: Request) {
     try {
         const supabase = createClient();
         const { message } = await req.json();
-        const apiKey = process.env.GEMINI_API_KEY;
 
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+        // Use your Hugging Face Access Token (starting with hf_...)
+        const apiKey = process.env.NEXT_PUBLIC_HF_API_KEY;
+
+        // The Hugging Face Router endpoint
+        const url = "https://router.huggingface.co/v1/chat/completions";
 
         const res = await fetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}` // Required for HF
+            },
             body: JSON.stringify({
-                contents: [{ parts: [{ text: message }] }],
+                // Specify the model you want to use here
+                model: "meta-llama/Llama-3.3-70B-Instruct",
+                messages: [
+                    { role: "user", content: message }
+                ],
+                max_tokens: 500,
             }),
         });
 
         const response = await res.json();
-        const aiResponse = response.candidates[0].content.parts[0].text;
-        console.log('response:', aiResponse);
 
-        return NextResponse.json({ text: aiResponse });
+        // Error handling for the API response
+        if (!res.ok) {
+            console.error('HF API Error:', response);
+            return NextResponse.json({ error: response.error || 'HF API Error' }, { status: res.status });
+        }
 
+        // HF Router returns data in the OpenAI format: response.choices[0].message.content
+        const aiResponse = response.choices[0].message.content;
+
+        return NextResponse.json({ data: aiResponse });
+
+        // --- Database Logic ---
+        // Note: I moved this above the first return so it actually executes!
         const { data, error } = await supabase
             .from('messages')
-            .insert([{ message }])
+            .insert([{ message, response: aiResponse }]) // Save both for better logs
             .select();
 
         if (error) {
-            return NextResponse.json({ error: error.message }, { status: 500 });
+            console.error('Supabase Error:', error.message);
+            // We still return the AI response even if DB fails, or handle as you prefer
         }
 
-        return NextResponse.json({ data });
+
+
     } catch (err) {
+        console.error('Server error:', err);
         return NextResponse.json({ error: 'Server error' }, { status: 500 });
     }
 }
