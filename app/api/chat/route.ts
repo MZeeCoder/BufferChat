@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/utils/supabase/server';
 
+
 // GET messages
 export async function GET() {
     try {
-        const supabase = createClient();
+        const supabase = await createClient();
 
         const { data, error } = await supabase
             .from('messages')
@@ -24,57 +25,73 @@ export async function GET() {
 // POST message
 export async function POST(req: Request) {
     try {
-        const supabase = createClient();
-        const { message } = await req.json();
-
-        // Use your Hugging Face Access Token (starting with hf_...)
+        const supabase = await createClient();
+        const { message, sessionId } = await req.json();
         const apiKey = process.env.NEXT_PUBLIC_HF_API_KEY;
 
-        // The Hugging Face Router endpoint
-        const url = "https://router.huggingface.co/v1/chat/completions";
+        // 1. STORE USER MESSAGE
+        const { error: userError } = await supabase
+            .from('messages')
+            .insert([{ session_id: sessionId, role: 'user', content: message }]);
 
-        const res = await fetch(url, {
+        if (userError) return NextResponse.json({ error: userError.message }, { status: 500 });
+
+        // 2. FETCH CONTEXT (Previous 3 messages + Summary)
+        // Get the summary from the session
+        const { data: sessionData } = await supabase
+            .from('chat_sessions')
+            .select('summary')
+            .eq('id', sessionId)
+            .single();
+
+        // Get last 3 messages for history
+        const { data: history } = await supabase
+            .from('messages')
+            .select('role, content')
+            .eq('session_id', sessionId)
+            .order('created_at', { ascending: false })
+            .limit(4); // limit 4 because we just added the new message
+
+        // 3. PREPARE THE PROMPT FOR HUGGING FACE
+        // We reverse the history so it's in chronological order for the AI
+        const formattedHistory = history?.reverse().map(m => ({ role: m.role, content: m.content })) || [];
+
+        // Add the summary as a 'system' message so the AI knows the past
+        const systemMessage = {
+            role: "system",
+            content: `Previous chat summary: ${sessionData?.summary || "No previous history."}`
+        };
+
+        // 4. CALL HUGGING FACE
+        const res = await fetch("https://router.huggingface.co/v1/chat/completions", {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}` // Required for HF
+                'Authorization': `Bearer ${apiKey}`
             },
             body: JSON.stringify({
-                // Specify the model you want to use here
                 model: "meta-llama/Llama-3.3-70B-Instruct",
-                messages: [
-                    { role: "user", content: message }
-                ],
+                messages: [systemMessage, ...formattedHistory], // Summary + History + Current Message
                 max_tokens: 500,
             }),
         });
 
         const response = await res.json();
+        if (!res.ok) return NextResponse.json({ error: 'HF API Error' }, { status: res.status });
 
-        // Error handling for the API response
-        if (!res.ok) {
-            console.error('HF API Error:', response);
-            return NextResponse.json({ error: response.error || 'HF API Error' }, { status: res.status });
-        }
-
-        // HF Router returns data in the OpenAI format: response.choices[0].message.content
         const aiResponse = response.choices[0].message.content;
 
-        return NextResponse.json({ data: aiResponse });
-
-        // --- Database Logic ---
-        // Note: I moved this above the first return so it actually executes!
-        const { data, error } = await supabase
+        // 5. STORE ASSISTANT RESPONSE
+        const { error: assistantError } = await supabase
             .from('messages')
-            .insert([{ message, response: aiResponse }]) // Save both for better logs
-            .select();
+            .insert([{ session_id: sessionId, role: 'assistant', content: aiResponse }]);
 
-        if (error) {
-            console.error('Supabase Error:', error.message);
-            // We still return the AI response even if DB fails, or handle as you prefer
-        }
+        if (assistantError) return NextResponse.json({ error: assistantError.message }, { status: 500 });
 
+        // 6. TRIGGER SUMMARY CHECK (Optional but recommended)
+        // You could check message count here and update the summary if it hits 10
 
+        return NextResponse.json({ data: aiResponse });
 
     } catch (err) {
         console.error('Server error:', err);
